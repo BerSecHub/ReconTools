@@ -5,8 +5,9 @@ import os
 import sys
 import json
 import requests
+import concurrent.futures
 from bs4 import BeautifulSoup
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 def setup_argparse():
@@ -16,14 +17,23 @@ def setup_argparse():
     )
     
     parser.add_argument('-d', '--domain', required=True, help='Target domain to search for (e.g., example.com)')
-    parser.add_argument('-o', '--output', default='domains.txt', help='Output file path (default: domains.txt)')
+    parser.add_argument('-o', '--output', help='Output file path (default: [domain]_subdomains.txt)')
     parser.add_argument('-w', '--wildcard', action='store_true', help='Include wildcard search (%%.domain.com)')
     parser.add_argument('-e', '--exclude-expired', action='store_true', help='Exclude expired certificates')
     parser.add_argument('-j', '--json', action='store_true', help='Use JSON API instead of HTML scraping (faster)')
     parser.add_argument('-t', '--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('-c', '--check', action='store_true', help='Check HTTP status of each domain')
+    parser.add_argument('-m', '--max-workers', type=int, default=10, help='Maximum number of concurrent workers for status checking (default: 10)')
+    parser.add_argument('--no-color', action='store_true', help='Disable colored output')
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Set default output filename based on domain name if not specified
+    if not args.output:
+        args.output = f"{args.domain}_subdomains.txt"
+    
+    return args
 
 
 def get_domains_from_html(domain, include_wildcard, exclude_expired, timeout, verbose):
@@ -116,6 +126,86 @@ def get_domains_from_json(domain, include_wildcard, exclude_expired, timeout, ve
         return get_domains_from_html(domain, include_wildcard, exclude_expired, timeout, verbose)
 
 
+# Define color codes
+class Colors:
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+def check_domain_status(domain, timeout=5):
+    """Check HTTP status for a domain"""
+    for protocol in ['https', 'http']:
+        url = f"{protocol}://{domain}"
+        try:
+            response = requests.head(url, timeout=timeout, allow_redirects=True)
+            return {
+                'domain': domain,
+                'url': url,
+                'status_code': response.status_code,
+                'redirected': response.url != url
+            }
+        except requests.RequestException:
+            # If https fails, try http, or if both fail, return error
+            if protocol == 'http':
+                return {
+                    'domain': domain,
+                    'url': url,
+                    'status_code': 0,
+                    'error': True
+                }
+    
+    # Should never reach here, but just in case
+    return {'domain': domain, 'status_code': 0, 'error': True}
+
+def check_domains_status(domains, max_workers=10, timeout=5):
+    """Check HTTP status for multiple domains concurrently"""
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_domain = {executor.submit(check_domain_status, domain, timeout): domain for domain in domains}
+        for future in concurrent.futures.as_completed(future_to_domain):
+            results.append(future.result())
+    return results
+
+def get_status_color(status_code):
+    """Return color code based on HTTP status"""
+    if status_code == 0:
+        return Colors.RED  # Error/timeout
+    elif 200 <= status_code < 300:
+        return Colors.GREEN
+    elif 300 <= status_code < 400:
+        return Colors.BLUE
+    elif 400 <= status_code < 500:
+        return Colors.YELLOW
+    elif status_code >= 500:
+        return Colors.RED
+    return Colors.RESET
+
+def print_status_results(results, use_color=True):
+    """Print domain check results with optional coloring"""
+    for result in sorted(results, key=lambda x: x['domain']):
+        domain = result['domain']
+        status = result['status_code']
+        
+        if status == 0:
+            status_text = "ERROR"
+        else:
+            status_text = str(status)
+        
+        if use_color:
+            color = get_status_color(status)
+            url = result.get('url', f"https://{domain}")
+            redirected = result.get('redirected', False)
+            
+            redirect_info = f" → {Colors.CYAN}{urlparse(result['url']).netloc}{Colors.RESET}" if redirected else ""
+            print(f"{domain} - {color}{status_text}{Colors.RESET}{redirect_info}")
+        else:
+            print(f"{domain} - {status_text}")
+
 def main():
     args = setup_argparse()
     
@@ -131,7 +221,7 @@ def main():
         print('No domains found.')
         return
     
-    # Write to output file
+    # Write to output file (clean list format)
     output_path = os.path.abspath(args.output)
     with open(output_path, 'w') as f:
         f.write('\n'.join(domains))
@@ -139,7 +229,13 @@ def main():
     print(f'Found {len(domains)} unique domains.')
     print(f'Results saved to: {output_path}')
     
-    if args.verbose:
+    # Check HTTP status if requested
+    if args.check:
+        print("\nChecking HTTP status for each domain...")
+        results = check_domains_status(domains, args.max_workers, args.timeout)
+        print("\nDomain Status Results:")
+        print_status_results(results, not args.no_color)
+    elif args.verbose:
         print('\nDomains found:')
         for domain in domains:
             print(f'- {domain}')
