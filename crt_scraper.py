@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import json
+import re
 import requests
 import concurrent.futures
 from bs4 import BeautifulSoup
@@ -48,9 +49,7 @@ def get_domains_from_html(domain, include_wildcard, exclude_expired, timeout, ve
         print(f'Querying: {url}')
     
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=timeout)
         response.raise_for_status()
         
@@ -63,16 +62,24 @@ def get_domains_from_html(domain, include_wildcard, exclude_expired, timeout, ve
             if len(cells) >= 6:
                 # Extract domain name data from the 6th column
                 name_data = cells[5].get_text().strip()
-                if name_data:
-                    # Split by newlines or commas and process each domain
-                    for subdomain in name_data.replace('\n', ',').split(','):
+                if name_data and domain in name_data:
+                    # Split by multiple separators and also split concatenated domains
+                    subdomains = re.split(r'[\n,\s]+', name_data)
+                    for subdomain in subdomains:
                         subdomain = subdomain.strip()
-                        if '.' in subdomain and domain in subdomain:
-                            # Clean up the domain (remove wildcards, spaces, etc.)
-                            clean_domain = subdomain.replace('*.', '').replace('.', '', 1) if subdomain.startswith('*.') else subdomain
-                            clean_domain = clean_domain.strip()
-                            if clean_domain and '.' in clean_domain and domain in clean_domain:
-                                domains.add(clean_domain)
+                        if subdomain.startswith('*.'):
+                            subdomain = subdomain[2:]
+                        
+                        # Handle concatenated domains like "ebok.aquanet.plwww.ebok.aquanet.pl"
+                        if subdomain.count(domain) > 1:
+                            # Split on the domain pattern
+                            parts = subdomain.split(domain)
+                            for i, part in enumerate(parts[:-1]):  # Skip the last empty part
+                                reconstructed = part + domain
+                                if reconstructed and '.' in reconstructed:
+                                    domains.add(reconstructed)
+                        elif subdomain and '.' in subdomain and domain in subdomain:
+                            domains.add(subdomain)
         
         return sorted(list(domains))
     
@@ -93,9 +100,7 @@ def get_domains_from_json(domain, include_wildcard, exclude_expired, timeout, ve
         print(f'Querying JSON API: {url}')
     
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=timeout)
         response.raise_for_status()
         
@@ -105,16 +110,24 @@ def get_domains_from_json(domain, include_wildcard, exclude_expired, timeout, ve
         for entry in data:
             # The JSON API uses 'name_value' for the domain field
             name_value = entry.get('name_value', '')
-            if name_value:
-                # Split by newlines or commas and process each domain
-                for subdomain in name_value.replace('\n', ',').split(','):
+            if name_value and domain in name_value:
+                # Split by multiple separators and also split concatenated domains
+                subdomains = re.split(r'[\n,\s]+', name_value)
+                for subdomain in subdomains:
                     subdomain = subdomain.strip()
-                    if '.' in subdomain and domain in subdomain:
-                        # Clean up the domain (remove wildcards, spaces, etc.)
-                        clean_domain = subdomain.replace('*.', '').replace('.', '', 1) if subdomain.startswith('*.') else subdomain
-                        clean_domain = clean_domain.strip()
-                        if clean_domain and '.' in clean_domain and domain in clean_domain:
-                            domains.add(clean_domain)
+                    if subdomain.startswith('*.'):
+                        subdomain = subdomain[2:]
+                    
+                    # Handle concatenated domains like "ebok.aquanet.plwww.ebok.aquanet.pl"
+                    if subdomain.count(domain) > 1:
+                        # Split on the domain pattern
+                        parts = subdomain.split(domain)
+                        for i, part in enumerate(parts[:-1]):  # Skip the last empty part
+                            reconstructed = part + domain
+                            if reconstructed and '.' in reconstructed:
+                                domains.add(reconstructed)
+                    elif subdomain and '.' in subdomain and domain in subdomain:
+                        domains.add(subdomain)
         
         return sorted(list(domains))
     
@@ -150,7 +163,6 @@ def check_domain_status(domain, timeout=5):
                 'redirected': response.url != url
             }
         except requests.RequestException:
-            # If https fails, try http, or if both fail, return error
             if protocol == 'http':
                 return {
                     'domain': domain,
@@ -159,7 +171,6 @@ def check_domain_status(domain, timeout=5):
                     'error': True
                 }
     
-    # Should never reach here, but just in case
     return {'domain': domain, 'status_code': 0, 'error': True}
 
 def check_domains_status(domains, max_workers=10, timeout=5):
@@ -198,9 +209,7 @@ def print_status_results(results, use_color=True):
         
         if use_color:
             color = get_status_color(status)
-            url = result.get('url', f"https://{domain}")
             redirected = result.get('redirected', False)
-            
             redirect_info = f" → {Colors.CYAN}{urlparse(result['url']).netloc}{Colors.RESET}" if redirected else ""
             print(f"{domain} - {color}{status_text}{Colors.RESET}{redirect_info}")
         else:
@@ -208,6 +217,11 @@ def print_status_results(results, use_color=True):
 
 def main():
     args = setup_argparse()
+    
+    # Basic domain validation
+    if not args.domain or '.' not in args.domain:
+        print(f'Error: Invalid domain format: {args.domain}', file=sys.stderr)
+        sys.exit(1)
     
     print(f'Starting crt.sh scraper for domain: {args.domain}')
     
